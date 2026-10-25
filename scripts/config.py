@@ -62,7 +62,7 @@ class Config:
         self.USE_AMP = True
 
         # Количество воркеров DataLoader
-        self.NUM_WORKERS = 2
+        self.NUM_WORKERS = 0
 
         # Клиппинг градиентов
         self.GRAD_CLIP = 1.0

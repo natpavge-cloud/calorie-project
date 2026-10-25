@@ -1,13 +1,5 @@
 ﻿"""
 Обучение, валидация и инференс мультимодальной модели калорийности.
-
-Структура:
-    - seed_everything        — воспроизводимость
-    - MultiModalCalorieModel — EfficientNet + DistilBERT + масса -> плотность
-    - build_optimizer        — AdamW с раздельными lr и weight decay
-    - train                  — единая точка запуска обучения
-    - evaluate_on_test       — инференс на test, возвращает DataFrame с ошибками
-    - load_checkpoint        — загрузка весов + статистик
 """
 import os
 import time
@@ -19,18 +11,14 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torchmetrics
 import timm
 from transformers import AutoModel
 from tqdm.auto import tqdm
 
 
-# =============================================================================
-# 1. Воспроизводимость
-# =============================================================================
 def seed_everything(seed: int = 42):
-    """Фиксируем все источники случайности."""
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -41,33 +29,18 @@ def seed_everything(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-# =============================================================================
-# 2. Модель
-# =============================================================================
 class MultiModalCalorieModel(nn.Module):
-    """
-    Мультимодальная модель:
-        - EfficientNet-B0 (картинка)  -> проекция в hidden_dim
-        - DistilBERT (текст)          -> проекция в hidden_dim
-        - масса (1 признак)
-        concat -> fusion (Linear+ReLU+Dropout) -> head (Linear -> 1)
-
-    Финальный слой — БЕЗ активации, потому что это регрессия.
-    """
-    def __init__(self, image_model_name: str = "efficientnet_b0",
-                 text_model_name: str = "distilbert-base-uncased",
-                 hidden_dim: int = 256):
+    def __init__(self, image_model_name="efficientnet_b0",
+                 text_model_name="distilbert-base-uncased",
+                 hidden_dim=256):
         super().__init__()
-        # --- энкодеры ---
         self.image_encoder = timm.create_model(
             image_model_name, pretrained=True, num_classes=0
         )
         num_image_features = self.image_encoder.num_features
-
         self.text_encoder = AutoModel.from_pretrained(text_model_name)
         num_text_features = self.text_encoder.config.hidden_size
 
-        # --- проекционные слои ---
         self.image_projection = nn.Sequential(
             nn.Linear(num_image_features, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -78,42 +51,29 @@ class MultiModalCalorieModel(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Dropout(0.3),
         )
-
-        # --- fusion ---
         self.fusion_layer = nn.Sequential(
             nn.Linear(hidden_dim + hidden_dim + 1, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.4),
         )
-        # --- head ---
         self.head = nn.Linear(hidden_dim, 1)
 
     def forward(self, image, text_inputs, mass):
-        # image: (B, 3, H, W)
-        image_feats = self.image_encoder(image)                # (B, C_img)
-        image_emb   = self.image_projection(image_feats)       # (B, H)
+        image_feats = self.image_encoder(image)
+        image_emb = self.image_projection(image_feats)
 
-        # text_inputs: dict с input_ids, attention_mask
         text_out = self.text_encoder(**text_inputs)
-        last_hidden = text_out.last_hidden_state               # (B, L, C_txt)
+        last_hidden = text_out.last_hidden_state
         mask = text_inputs["attention_mask"].unsqueeze(-1).float()
-        # Маскированное среднее по токенам
         text_feats = (last_hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
-        text_emb   = self.text_projection(text_feats)          # (B, H)
+        text_emb = self.text_projection(text_feats)
 
-        # concat + fusion + head
         combined = torch.cat([image_emb, text_emb, mass], dim=1)
         x = self.fusion_layer(combined)
-        return self.head(x)                                    # (B, 1)
+        return self.head(x)
 
 
-# =============================================================================
-# 3. Оптимизатор с раздельными lr и корректным weight_decay
-# =============================================================================
-def build_optimizer(model: MultiModalCalorieModel, cfg):
-    """
-    AdamW с раздельными lr и исключением bias/LayerNorm из weight decay.
-    """
+def build_optimizer(model, cfg):
     no_decay = ("bias", "LayerNorm.weight", "LayerNorm.bias")
 
     def split_params(module, lr):
@@ -131,24 +91,16 @@ def build_optimizer(model: MultiModalCalorieModel, cfg):
         ]
 
     param_groups = []
-    param_groups += split_params(model.text_encoder,       cfg.TEXT_LR)
-    param_groups += split_params(model.image_encoder,      cfg.IMAGE_LR)
-    param_groups += split_params(model.text_projection,    cfg.CLASSIFIER_LR)
-    param_groups += split_params(model.image_projection,   cfg.CLASSIFIER_LR)
-    param_groups += split_params(model.fusion_layer,       cfg.CLASSIFIER_LR)
-    param_groups += split_params(model.head,               cfg.CLASSIFIER_LR)
-
+    param_groups += split_params(model.text_encoder,     cfg.TEXT_LR)
+    param_groups += split_params(model.image_encoder,    cfg.IMAGE_LR)
+    param_groups += split_params(model.text_projection,  cfg.CLASSIFIER_LR)
+    param_groups += split_params(model.image_projection, cfg.CLASSIFIER_LR)
+    param_groups += split_params(model.fusion_layer,     cfg.CLASSIFIER_LR)
+    param_groups += split_params(model.head,             cfg.CLASSIFIER_LR)
     return AdamW(param_groups)
 
 
-# =============================================================================
-# 4. Обучение
-# =============================================================================
 def train(cfg, train_dataset, valid_dataset):
-    """
-    Единая точка запуска обучения. Возвращает обученную модель.
-    Сохраняет лучший чекпоинт в cfg.MODEL_SAVE_PATH.
-    """
     seed_everything(cfg.SEED)
     device = torch.device(cfg.DEVICE)
     print(cfg.summary())
@@ -162,28 +114,23 @@ def train(cfg, train_dataset, valid_dataset):
         num_workers=cfg.NUM_WORKERS, pin_memory=True,
     )
 
-    # --- модель ---
     model = MultiModalCalorieModel(
         image_model_name=cfg.IMAGE_MODEL,
         text_model_name=cfg.TEXT_MODEL,
         hidden_dim=cfg.HIDDEN_DIM,
     ).to(device)
 
-    # --- loss и метрики ---
-    criterion = nn.L1Loss()                       # MAE — целевая метрика
+    criterion = nn.L1Loss()
     density_mae  = torchmetrics.MeanAbsoluteError().to(device)
     calories_mae = torchmetrics.MeanAbsoluteError().to(device)
 
-    # --- optimizer и scheduler ---
     optimizer = build_optimizer(model, cfg)
     scheduler = ReduceLROnPlateau(optimizer, mode="min",
                                   factor=0.5, patience=2, min_lr=1e-6)
 
-    # --- mixed precision ---
     use_amp = cfg.USE_AMP and device.type == "cuda"
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler("cuda", enabled=use_amp)
 
-    # --- статистики ---
     t_mean, t_std = cfg.TARGET_MEAN, cfg.TARGET_STD
     m_mean, m_std = cfg.MASS_MEAN,   cfg.MASS_STD
 
@@ -196,7 +143,6 @@ def train(cfg, train_dataset, valid_dataset):
     for epoch in range(cfg.EPOCHS):
         t0 = time.time()
 
-        # ---------------- TRAIN ----------------
         model.train()
         density_mae.reset()
         train_loss_sum = 0.0
@@ -212,7 +158,7 @@ def train(cfg, train_dataset, valid_dataset):
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=use_amp):
+            with autocast("cuda", enabled=use_amp):
                 out  = model(images, text, mass)
                 loss = criterion(out, target)
 
@@ -228,9 +174,8 @@ def train(cfg, train_dataset, valid_dataset):
             bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         train_loss_avg      = train_loss_sum / max(n_batches, 1)
-        train_density_mae_c = density_mae.compute().item() * t_std   # ккал/100г
+        train_density_mae_c = density_mae.compute().item() * t_std
 
-        # ---------------- VALID ----------------
         model.eval()
         density_mae.reset()
         calories_mae.reset()
@@ -242,12 +187,10 @@ def train(cfg, train_dataset, valid_dataset):
                 text   = {k: v.to(device, non_blocking=True)
                           for k, v in batch["text"].items()}
 
-                with autocast(enabled=use_amp):
+                with autocast("cuda", enabled=use_amp):
                     out = model(images, text, mass)
 
                 density_mae.update(out, target)
-
-                # Обратно в физ. единицы
                 pred_density = out    * t_std + t_mean
                 true_density = target * t_std + t_mean
                 true_mass    = mass   * m_std + m_mean
@@ -260,7 +203,6 @@ def train(cfg, train_dataset, valid_dataset):
         val_calories_mae = calories_mae.compute().item()
         dt = time.time() - t0
 
-        # ---------------- ЛОГ ----------------
         print(f"--> Epoch {epoch+1:02d} | {dt:5.1f}s | "
               f"train_loss={train_loss_avg:.4f} | "
               f"train_densMAE={train_density_mae_c:.2f} | "
@@ -276,7 +218,6 @@ def train(cfg, train_dataset, valid_dataset):
             "time_sec": dt,
         })
 
-        # ---------------- Сохранение лучшего ----------------
         if val_calories_mae < best_val_cal_mae:
             best_val_cal_mae = val_calories_mae
             best_epoch = epoch + 1
@@ -303,18 +244,11 @@ def train(cfg, train_dataset, valid_dataset):
     return model, pd.DataFrame(history)
 
 
-# =============================================================================
-# 5. Инференс на test
-# =============================================================================
-def load_checkpoint(path: str, device):
-    """Загружает чекпоинт на устройство."""
+def load_checkpoint(path, device):
     return torch.load(path, map_location=device, weights_only=False)
 
 
-def evaluate_on_test(cfg, test_dataset, checkpoint_path: str | None = None):
-    """
-    Прогоняет лучший чекпоинт по test_dataset, возвращает DataFrame с ошибками.
-    """
+def evaluate_on_test(cfg, test_dataset, checkpoint_path=None):
     device = torch.device(cfg.DEVICE)
     ckpt = load_checkpoint(checkpoint_path or cfg.MODEL_SAVE_PATH, device)
 
@@ -339,7 +273,6 @@ def evaluate_on_test(cfg, test_dataset, checkpoint_path: str | None = None):
             mass   = batch["mass"].to(device)
             target = batch["target"].to(device)
             text   = {k: v.to(device) for k, v in batch["text"].items()}
-
             out = model(images, text, mass).item()
 
             pred_density = out          * t_std + t_mean
@@ -359,7 +292,7 @@ def evaluate_on_test(cfg, test_dataset, checkpoint_path: str | None = None):
     df["error"] = (df["true_calories"] - df["pred_calories"]).abs()
 
     mae = df["error"].mean()
-    print(f"\n🎯 Test MAE: {mae:.2f} ккал")
+    print(f"\nTest MAE: {mae:.2f} ккал")
     print(f"Медиана ошибки: {df['error'].median():.2f}")
     print(f"90-й перцентиль: {df['error'].quantile(0.9):.2f}")
 

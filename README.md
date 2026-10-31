@@ -5,6 +5,11 @@
 ## Проект выполнила:
 Павлова Наталья Геннадьевна, группа М25-555
 
+**Репозиторий:** [github.com/natpavge-cloud/calorie-project](https://github.com/natpavge-cloud/calorie-project)  
+**Ноутбук:** [notebook.ipynb](https://github.com/natpavge-cloud/calorie-project/blob/main/notebook.ipynb)
+
+Мультимодальная нейросеть для предсказания калорийности блюд по фотографии и текстовому описанию ингредиентов.
+
 ## Результаты
 
 | Метрика | Значение |

@@ -1,24 +1,37 @@
-# Данные (большие)
-data/images/
-data/images.zip
-*.zip
-*.tar.gz
-*.tar
+# Р”Р°РЅРЅС‹Рµ (С‚СЏР¶С‘Р»С‹Рµ, РЅРµ РєРѕРјРјРёС‚РёРј)
+data/
+*.csv
+!requirements.csv
+
+# РњРѕРґРµР»СЊРЅС‹Рµ Р°СЂС‚РµС„Р°РєС‚С‹
+*.pth
+*.pt
+*.ckpt
+*.safetensors
 
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .ipynb_checkpoints/
-
-# Окружение
+.pytest_cache/
 .venv/
 venv/
-env/
 
-# IDE
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
+
+# Colab
+/content/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.rar

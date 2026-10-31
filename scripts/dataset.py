@@ -4,12 +4,12 @@
 DishDataset возвращает:
     - image:       torch.Tensor (3, H, W) после albumentations + ToTensorV2
     - text:        dict с input_ids / attention_mask от HuggingFace tokenizer
-    - mass:        np.float32 [1] — нормализованная масса
-    - target:      np.float32 [1] — нормализованная ПЛОТНОСТЬ (ккал/100г)
+    - mass:        np.float32 [1] - нормализованная масса
+    - target:      np.float32 [1] - нормализованная ПЛОТНОСТЬ (ккал/100г)
 
 Почему плотность, а не абсолютные калории:
     - модель иначе тривиально выучивает «калории ≈ масса»,
-    - плотность — более информативная цель, калории восстанавливаются
+    - плотность - более информативная цель, калории восстанавливаются
       как pred_density * true_mass / 100.
 """
 import os
@@ -21,7 +21,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 
-# Допустимый диапазон плотности (ккал/100г) — защита от выбросов и нулевой массы
+# Допустимый диапазон плотности (ккал/100г) - защита от выбросов и нулевой массы
 DENSITY_MIN = 0.0
 DENSITY_MAX = 1000.0
 
@@ -33,7 +33,7 @@ class DishDataset(Dataset):
     df : pd.DataFrame
         Ожидаемые колонки: dish_id, ingredients_clean, total_mass, total_calories.
     images_dir : str
-        Корневая папка, внутри — подпапки {dish_id}/rgb.png
+        Корневая папка, внутри - подпапки {dish_id}/rgb.png
     transform : albumentations.Compose | None
     tokenizer : HuggingFace tokenizer | None
     max_length : int
@@ -60,7 +60,7 @@ class DishDataset(Dataset):
         self.mass_mean = mass_mean
         self.mass_std = mass_std
 
-        # Валидация путей: упадём сразу, если чего-то нет
+        # Валидация путей
         if validate_paths:
             missing = []
             for dish_id in self.df["dish_id"].values:
@@ -73,7 +73,7 @@ class DishDataset(Dataset):
                     + "\n".join(missing[:10])
                 )
 
-        # Логирование (кратко)
+        # Логирование
         n = len(self.df)
         print(f"[DishDataset] size={n}, images_dir={self.images_dir}, "
               f"transform={'yes' if transform else 'no'}")
@@ -85,7 +85,7 @@ class DishDataset(Dataset):
         row = self.df.iloc[idx]
         dish_id = row["dish_id"]
 
-        # ---------------- Изображение ----------------
+        # Изображение
         img_path = os.path.join(self.images_dir, str(dish_id), "rgb.png")
         with Image.open(img_path) as img:
             image = np.array(img.convert("RGB"))
@@ -93,7 +93,7 @@ class DishDataset(Dataset):
         if self.transform is not None:
             image = self.transform(image=image)["image"]
 
-        # ---------------- Текст ----------------
+        # Текст
         ingredients = row.get("ingredients_clean", "")
         text_input = str(ingredients) if pd.notna(ingredients) else ""
 
@@ -109,11 +109,11 @@ class DishDataset(Dataset):
         else:
             text_features = text_input
 
-        # ---------------- Масса и целевая (плотность) ----------------
+        # Масса и целевая плотность
         mass_val = float(row.get("total_mass", 0.0) or 0.0)
         cal_val  = float(row.get("total_calories", 0.0) or 0.0)
 
-        # Плотность: ккал на 100 г. Clamp — защита от деления на ~0 и выбросов.
+        # Плотность: ккал на 100 г. Clamp - защита от деления на ~0 и выбросов.
         density_val = cal_val / (mass_val + 1e-6) * 100.0
         density_val = float(np.clip(density_val, DENSITY_MIN, DENSITY_MAX))
 
@@ -149,7 +149,7 @@ def get_train_transforms(img_size: int = 224,
 
 
 def get_valid_transforms(img_size: int = 224):
-    """Валидация/тест — только resize + normalize, без аугментаций."""
+    """Валидация/тест - только resize + normalize, без аугментаций."""
     return A.Compose([
         A.Resize(img_size, img_size),
         A.Normalize(mean=(0.485, 0.456, 0.406),
@@ -160,7 +160,7 @@ def get_valid_transforms(img_size: int = 224):
 
 def build_dataloaders(train_ds, valid_ds, test_ds, batch_size=4,
                       num_workers=2):
-    """Удобная обёртка для DataLoader-ов."""
+    
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True, drop_last=False,
